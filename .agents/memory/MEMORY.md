@@ -1,0 +1,1 @@
+- [Staged auto-body Reel Editor](staged-reel-editor.md) — Build only the requested checkpoint; wait for explicit requests before editing, publishing, messaging, or database stages.

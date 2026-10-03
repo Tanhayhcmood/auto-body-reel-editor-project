@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "aYYnB50G8HCEa0z8E4MlQ"
+uri = "file://exports/auto-body-reel-editor-project.zip"
+type = "unspecified"
+title = "Auto-Body Reel Editor project ZIP"
+description = "Current project source and configuration with folder structure preserved. Excludes dependencies, build outputs, secrets, and the two byte-identical duplicate uploaded ZIPs. Archive integrity verified; 128 unique files."
+logical_id = "1fbc0416-c6df-4f14-83f0-9cec055b95e7"
+content_hash = "sha256:c2efe345d231aea491141f7dfaa1b2500508224f74448baf92c95f91930654c9"
+size = 162279
+mtime_ms = 1791045562160
+storage_uri = "gcs://replit-rams-assets-kira/rams/assets/repl:ef9b8d47-418e-4622-a6d3-1296665691b3/1fbc0416-c6df-4f14-83f0-9cec055b95e7/8b9706a3-a97b-46ee-84e9-4d25612cc997"
+storage_version_token = "1791045568580339"
+content_type = "application/octet-stream"
