@@ -41,3 +41,31 @@ export function getUploadedVideoPath(videoId: string): string {
   }
   return join(getVideoUploadDirectory(), videoId);
 }
+
+export function getVideoReelPath(
+  videoId: string,
+  reelId: string,
+  artifactsDirectory = getVideoAnalysisDirectory(),
+): string {
+  if (!isVideoId(videoId) || !isVideoId(reelId)) {
+    throw new Error("Invalid video or Reel ID.");
+  }
+  const baseDirectory = isAbsolute(artifactsDirectory)
+    ? artifactsDirectory
+    : join(process.cwd(), artifactsDirectory);
+  return join(baseDirectory, videoId, "reels", `${reelId}.mp4`);
+}
+
+export function getVideoReelPlanPath(
+  videoId: string,
+  reelId: string,
+  artifactsDirectory = getVideoAnalysisDirectory(),
+): string {
+  if (!isVideoId(videoId) || !isVideoId(reelId)) {
+    throw new Error("Invalid video or Reel ID.");
+  }
+  const baseDirectory = isAbsolute(artifactsDirectory)
+    ? artifactsDirectory
+    : join(process.cwd(), artifactsDirectory);
+  return join(baseDirectory, videoId, "reels", `${reelId}.json`);
+}

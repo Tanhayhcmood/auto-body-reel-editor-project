@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: videos
+    description: Video upload, analysis, Reel processing, and output retrieval
 paths:
   /healthz:
     get:
@@ -24,7 +26,212 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /videos/upload:
+    post:
+      operationId: uploadVideo
+      tags: [videos]
+      summary: Upload a source video
+      description: Uploads one video file and returns its ID and probed metadata.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/VideoUploadInput"
+      responses:
+        "201":
+          description: Video uploaded and metadata extracted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VideoUploadResult"
+        "400":
+          description: No video was attached
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Video exceeds the upload size limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: The uploaded file is not a video
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Video metadata could not be read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: API access is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /videos/{id}/analyze:
+    post:
+      operationId: analyzeVideo
+      tags: [videos]
+      summary: Analyze video segments
+      description: Detects scene boundaries, extracts representative frames, and analyzes them with Gemini.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Structured segment analysis
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VideoAnalysis"
+        "400":
+          description: Invalid video ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Uploaded video was not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Video segmentation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Gemini analysis failed or returned invalid data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: API access is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /videos/{id}/process:
+    post:
+      operationId: processVideoToReel
+      tags: [videos]
+      summary: Analyze and render a Reel
+      description: Uses Gemini analysis and edit decisions, renders a Persian-captioned 9:16 MP4, and returns its download URL.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Reel plan, analysis, and rendered output details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessedReelResult"
+        "400":
+          description: Invalid video ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Uploaded video was not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Video metadata or FFmpeg processing failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Gemini returned an error or invalid edit plan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: API access is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /videos/{id}/reels/{reelId}/download:
+    get:
+      operationId: downloadReel
+      tags: [videos]
+      summary: Download a rendered Reel
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: reelId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Rendered 9:16 MP4
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Invalid video or Reel ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Rendered MP4 was not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: API access is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
   schemas:
     HealthStatus:
       type: object
@@ -33,4 +240,232 @@ components:
           type: string
       required:
         - status
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+    VideoUploadInput:
+      type: object
+      properties:
+        video:
+          type: string
+          format: binary
+      required: [video]
+    VideoMetadata:
+      type: object
+      properties:
+        durationSeconds:
+          type: number
+        width:
+          type: integer
+        height:
+          type: integer
+        fps:
+          type: [number, "null"]
+        hasAudio:
+          type: boolean
+      required: [durationSeconds, width, height, fps, hasAudio]
+    VideoUploadResult:
+      type: object
+      properties:
+        videoId:
+          type: string
+          format: uuid
+        metadata:
+          $ref: "#/components/schemas/VideoMetadata"
+      required: [videoId, metadata]
+    SegmentAnalysis:
+      type: object
+      properties:
+        segment_id:
+          type: string
+        start:
+          type: number
+        end:
+          type: number
+        summary:
+          type: string
+        visual_events:
+          type: array
+          items:
+            type: string
+        labels:
+          type: array
+          items:
+            type: string
+            enum:
+              - damaged_area
+              - before_repair
+              - repair_process
+              - tools_action
+              - close_up_detail
+              - satisfying_moment
+              - final_result
+              - vehicle_reveal
+              - painting
+              - sanding
+              - polishing
+              - dent_repair
+              - uninteresting
+              - repetitive
+              - blurry
+        quality_score:
+          type: number
+        interest_score:
+          type: number
+        repair_relevance:
+          type: number
+        transformation_value:
+          type: number
+      required:
+        - segment_id
+        - start
+        - end
+        - summary
+        - visual_events
+        - labels
+        - quality_score
+        - interest_score
+        - repair_relevance
+        - transformation_value
+    VideoAnalysisArtifacts:
+      type: object
+      properties:
+        segments_json:
+          type: string
+        analysis_json:
+          type: string
+      required: [segments_json, analysis_json]
+    VideoAnalysis:
+      type: object
+      properties:
+        video_id:
+          type: string
+          format: uuid
+        duration_seconds:
+          type: number
+        width:
+          type: integer
+        height:
+          type: integer
+        has_audio:
+          type: boolean
+        scene_change_seconds:
+          type: array
+          items:
+            type: number
+        segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/SegmentAnalysis"
+        artifacts:
+          $ref: "#/components/schemas/VideoAnalysisArtifacts"
+      required:
+        - video_id
+        - duration_seconds
+        - width
+        - height
+        - has_audio
+        - scene_change_seconds
+        - segments
+        - artifacts
+    ReelEditClip:
+      type: object
+      properties:
+        segment_id:
+          type: string
+        source_start_seconds:
+          type: number
+        source_end_seconds:
+          type: number
+        order:
+          type: integer
+        selection_reason:
+          type: string
+        caption_text:
+          type: string
+        caption_start_seconds:
+          type: number
+        caption_end_seconds:
+          type: number
+        reframe_x:
+          type: number
+        reframe_y:
+          type: number
+      required:
+        - segment_id
+        - source_start_seconds
+        - source_end_seconds
+        - order
+        - selection_reason
+        - caption_text
+        - caption_start_seconds
+        - caption_end_seconds
+        - reframe_x
+        - reframe_y
+    ReelEditPlan:
+      type: object
+      properties:
+        story_arc:
+          type: string
+        hook_text:
+          type: string
+        hook_duration_seconds:
+          type: number
+        clips:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReelEditClip"
+      required: [story_arc, hook_text, hook_duration_seconds, clips]
+    ProcessedReelOutputArtifacts:
+      type: object
+      properties:
+        edit_plan_json:
+          type: string
+      required: [edit_plan_json]
+    ProcessedReelOutput:
+      type: object
+      properties:
+        reel_id:
+          type: string
+          format: uuid
+        mime_type:
+          type: string
+          enum: [video/mp4]
+        width:
+          type: integer
+        height:
+          type: integer
+        duration_seconds:
+          type: number
+        file_size_bytes:
+          type: integer
+        download_url:
+          type: string
+        artifacts:
+          $ref: "#/components/schemas/ProcessedReelOutputArtifacts"
+      required:
+        - reel_id
+        - mime_type
+        - width
+        - height
+        - duration_seconds
+        - file_size_bytes
+        - download_url
+        - artifacts
+    ProcessedReelResult:
+      type: object
+      properties:
+        video_id:
+          type: string
+          format: uuid
+        analysis:
+          $ref: "#/components/schemas/VideoAnalysis"
+        edit_plan:
+          $ref: "#/components/schemas/ReelEditPlan"
+        output:
+          $ref: "#/components/schemas/ProcessedReelOutput"
+      required: [video_id, analysis, edit_plan, output]
 

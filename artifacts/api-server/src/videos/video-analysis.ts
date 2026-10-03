@@ -43,7 +43,7 @@ export interface VideoAnalysisResult {
   };
 }
 
-interface AnalysisOptions {
+export interface VideoAnalysisOptions {
   provider?: AIProvider;
   artifactsDirectory?: string;
   metadataExtractor?: (videoPath: string) => Promise<VideoMetadata>;
@@ -117,7 +117,7 @@ function framePathForArtifact(runDirectory: string, framePath: string): string {
 export async function analyzeUploadedVideo(
   videoId: string,
   videoPath: string,
-  options: AnalysisOptions = {},
+  options: VideoAnalysisOptions = {},
 ): Promise<VideoAnalysisResult> {
   if (!isVideoId(videoId)) {
     throw new Error("Invalid video ID.");

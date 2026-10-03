@@ -6,6 +6,6 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface HealthStatus {
-  status: string;
+export interface ProcessedReelOutputArtifacts {
+  edit_plan_json: string;
 }

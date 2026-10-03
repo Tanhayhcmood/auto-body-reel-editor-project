@@ -7,6 +7,7 @@ export interface AIProvider {
   readonly name: string;
   readonly model: string;
   generateText(prompt: string): Promise<string>;
+  generateJson(prompt: string): Promise<string>;
   generateMultimodal(
     prompt: string,
     images: GeminiImageInput[],
@@ -47,6 +48,14 @@ export class GeminiProvider implements AIProvider {
 
   async generateText(prompt: string): Promise<string> {
     return this.request([{ text: prompt }]);
+  }
+
+  async generateJson(prompt: string): Promise<string> {
+    return this.request([{ text: prompt }], {
+      responseMimeType: "application/json",
+      temperature: 0.25,
+      maxOutputTokens: 8192,
+    });
   }
 
   async generateMultimodal(

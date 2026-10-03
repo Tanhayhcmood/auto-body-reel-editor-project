@@ -1,6 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "lib": ["es2022", "dom"],
     "composite": true,
     "declarationMap": true,
     "emitDeclarationOnly": true,
