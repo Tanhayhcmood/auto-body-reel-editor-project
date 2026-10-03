@@ -203,3 +203,89 @@ test("video updates download, analyze, reply, and remove the temporary upload", 
   assert.ok(sentMessages.some((message) => message.includes("تحلیل ویدئو کامل شد")));
   assert.deepEqual(await readdir(uploadDirectory), []);
 });
+
+test("rejects files above Telegram's 20 MB download limit before fetching", async () => {
+  const sentMessages: string[] = [];
+  let requestCount = 0;
+  const fetcher: typeof fetch = async (input, init) => {
+    requestCount += 1;
+    const url = String(input);
+    if (url.endsWith("/sendMessage")) {
+      const requestBody = JSON.parse(String(init?.body)) as { text: string };
+      sentMessages.push(requestBody.text);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response("", { status: 404 });
+  };
+
+  await processTelegramUpdate(
+    {
+      updateId: 4,
+      message: {
+        chatId: 123,
+        video: { fileId: "telegram-file-id", fileSize: 20_000_001 },
+      },
+    },
+    "test-token",
+    { fetcher },
+  );
+
+  assert.equal(requestCount, 1);
+  assert.equal(sentMessages.length, 1);
+  assert.match(sentMessages[0] ?? "", /۲۰ مگابایت/);
+});
+
+test("does not mislabel analysis failures as oversized videos", async (t) => {
+  const uploadDirectory = await mkdtemp(join(tmpdir(), "telegram-video-error-test-"));
+  t.after(async () => rm(uploadDirectory, { recursive: true, force: true }));
+
+  const sentMessages: string[] = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/getFile")) {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          result: { file_path: "videos/sample.mp4", file_size: 4 },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url.includes("/file/bottest-token/")) {
+      return new Response(Uint8Array.from([0, 1, 2, 3]));
+    }
+    if (url.endsWith("/sendMessage")) {
+      const requestBody = JSON.parse(String(init?.body)) as { text: string };
+      sentMessages.push(requestBody.text);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response("", { status: 404 });
+  };
+
+  await processTelegramUpdate(
+    {
+      updateId: 5,
+      message: {
+        chatId: 123,
+        video: { fileId: "telegram-file-id", fileSize: 4 },
+      },
+    },
+    "test-token",
+    {
+      fetcher,
+      uploadDirectory,
+      analyze: async () => {
+        throw new Error("Gemini API request failed with status 429.");
+      },
+    },
+  );
+
+  assert.equal(sentMessages.length, 2);
+  assert.match(sentMessages[1] ?? "", /کمی بعد دوباره تلاش/);
+  assert.doesNotMatch(sentMessages[1] ?? "", /ویدئوی کوتاه‌تری/);
+  assert.deepEqual(await readdir(uploadDirectory), []);
+});

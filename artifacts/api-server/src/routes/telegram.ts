@@ -10,7 +10,10 @@ import {
 import { getVideoUploadDirectory } from "../videos/storage";
 
 const TELEGRAM_API_URL = "https://api.telegram.org";
-const MAX_TELEGRAM_DOWNLOAD_BYTES = 20 * 1024 * 1024;
+const MAX_TELEGRAM_DOWNLOAD_BYTES = 20_000_000;
+const TELEGRAM_FILE_TOO_LARGE_ERROR = "Telegram video exceeds the download limit.";
+const TELEGRAM_FILE_TOO_LARGE_REPLY =
+  "حجم ویدئو از سقف دانلود تلگرام (۲۰ مگابایت) بیشتر است. لطفاً ویدئوی کم‌حجم‌تری بفرستید.";
 const MAX_TELEGRAM_MESSAGE_LENGTH = 3_800;
 const MAX_RECENT_UPDATES = 5_000;
 
@@ -137,6 +140,33 @@ function secretsMatch(expected: string, provided: string | undefined): boolean {
     expectedBytes.length > 0 &&
     expectedBytes.length === providedBytes.length &&
     timingSafeEqual(expectedBytes, providedBytes)
+  );
+}
+
+function safeErrorDetails(error: unknown): {
+  errorName: string;
+  errorMessage: string;
+} {
+  const errorName =
+    error instanceof Error && error.name ? error.name : "UnknownError";
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const errorMessage = rawMessage
+    .replace(/\b\d{6,}:[A-Za-z0-9_-]{20,}\b/g, "[REDACTED_TELEGRAM_TOKEN]")
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "[REDACTED_API_KEY]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+    .slice(0, 300);
+  return { errorName: errorName.slice(0, 80), errorMessage };
+}
+
+function logTelegramProcessingError(
+  updateId: number,
+  stage: string,
+  error: unknown,
+  message: string,
+): void {
+  logger.error(
+    { updateId, stage, ...safeErrorDetails(error) },
+    message,
   );
 }
 
@@ -334,18 +364,14 @@ export async function processTelegramUpdate(
     media.fileSize !== undefined &&
     media.fileSize > MAX_TELEGRAM_DOWNLOAD_BYTES
   ) {
-    await sendMessage(
-      chatId,
-      "حجم ویدئو بیشتر از سقف دانلود تلگرام (۲۰ مگابایت) است.",
-      token,
-      fetcher,
-    );
+    await sendMessage(chatId, TELEGRAM_FILE_TOO_LARGE_REPLY, token, fetcher);
     return;
   }
 
   await sendMessage(chatId, "ویدئو دریافت شد؛ در حال تحلیل آن هستم.", token, fetcher);
 
   let videoPath: string | undefined;
+  let stage = "get_telegram_file";
   try {
     const file = await callTelegramApi<{ file_path?: unknown; file_size?: unknown }>(
       token,
@@ -360,34 +386,52 @@ export async function processTelegramUpdate(
       typeof file.file_size === "number" &&
       file.file_size > MAX_TELEGRAM_DOWNLOAD_BYTES
     ) {
-      throw new Error("Telegram video exceeds the download limit.");
+      throw new Error(TELEGRAM_FILE_TOO_LARGE_ERROR);
     }
 
+    stage = "download_telegram_file";
     const contents = await downloadTelegramFile(token, file.file_path, fetcher);
     if (contents.byteLength > MAX_TELEGRAM_DOWNLOAD_BYTES) {
-      throw new Error("Telegram video exceeds the download limit.");
+      throw new Error(TELEGRAM_FILE_TOO_LARGE_ERROR);
     }
 
     const videoId = randomUUID();
     const uploadDirectory = options.uploadDirectory ?? getVideoUploadDirectory();
+    stage = "store_video";
     await mkdir(uploadDirectory, { recursive: true });
     videoPath = join(uploadDirectory, videoId);
     await writeFile(videoPath, contents, { flag: "wx" });
 
+    stage = "analyze_video";
     const analyze =
       options.analyze ??
       ((id: string, path: string) => analyzeUploadedVideo(id, path));
     const result = await analyze(videoId, videoPath);
+    stage = "send_analysis";
     for (const text of formatVideoAnalysisMessages(result)) {
       await sendMessage(chatId, text, token, fetcher);
     }
-  } catch {
-    await sendMessage(
-      chatId,
-      "تحلیل ویدئو انجام نشد. لطفاً ویدئوی کوتاه‌تری بفرستید یا کمی بعد دوباره تلاش کنید.",
-      token,
-      fetcher,
+  } catch (error) {
+    logTelegramProcessingError(
+      update.updateId,
+      stage,
+      error,
+      "Telegram video processing failed",
     );
+    const failureReply =
+      error instanceof Error && error.message === TELEGRAM_FILE_TOO_LARGE_ERROR
+        ? TELEGRAM_FILE_TOO_LARGE_REPLY
+        : "تحلیل ویدئو انجام نشد. لطفاً کمی بعد دوباره تلاش کنید.";
+    try {
+      await sendMessage(chatId, failureReply, token, fetcher);
+    } catch (notificationError) {
+      logTelegramProcessingError(
+        update.updateId,
+        "send_failure_notice",
+        notificationError,
+        "Could not notify the user that video processing failed",
+      );
+    }
   } finally {
     if (videoPath) {
       await unlink(videoPath).catch(() => undefined);
@@ -447,9 +491,11 @@ export function createTelegramWebhookHandler(
     }
 
     response.status(200).end();
-    void processUpdate(update, token).catch(() => {
-      logger.warn(
-        { updateId: update.updateId },
+    void processUpdate(update, token).catch((error: unknown) => {
+      logTelegramProcessingError(
+        update.updateId,
+        "process_update",
+        error,
         "Telegram update processing failed",
       );
     });
