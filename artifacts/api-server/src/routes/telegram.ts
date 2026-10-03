@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Router, type IRouter, type Request, type RequestHandler } from "express";
 import { logger } from "../lib/logger";
@@ -8,12 +8,20 @@ import {
   type VideoAnalysisResult,
 } from "../videos/video-analysis";
 import { getVideoUploadDirectory } from "../videos/storage";
+import {
+  NoSuitableAutoReelSegmentsError,
+  renderAutoBodyReel,
+  type AutoReelPlan,
+} from "../videos/reel-editor";
 
 const TELEGRAM_API_URL = "https://api.telegram.org";
 const MAX_TELEGRAM_DOWNLOAD_BYTES = 20_000_000;
 const TELEGRAM_FILE_TOO_LARGE_ERROR = "Telegram video exceeds the download limit.";
 const TELEGRAM_FILE_TOO_LARGE_REPLY =
   "حجم ویدئو از سقف دانلود تلگرام (۲۰ مگابایت) بیشتر است. لطفاً ویدئوی کم‌حجم‌تری بفرستید.";
+const TELEGRAM_REEL_TOO_LARGE_ERROR = "Edited reel exceeds Telegram upload limit.";
+const TELEGRAM_REEL_TOO_LARGE_REPLY =
+  "ریل ساخته شد، اما حجم فایل از سقف ارسال ۲۰ مگابایت بیشتر است.";
 const MAX_TELEGRAM_MESSAGE_LENGTH = 3_800;
 const MAX_RECENT_UPDATES = 5_000;
 
@@ -47,6 +55,7 @@ export interface TelegramProcessingOptions {
   fetcher?: typeof fetch;
   uploadDirectory?: string;
   analyze?: VideoAnalyzer;
+  renderReel?: (inputPath: string, outputPath: string, result: VideoAnalysisResult) => Promise<AutoReelPlan>;
 }
 
 export interface TelegramWebhookOptions extends TelegramProcessingOptions {
@@ -281,6 +290,33 @@ async function sendMessage(
   );
 }
 
+
+async function sendTelegramVideo(chatId: number, videoPath: string, caption: string, token: string, fetcher: typeof fetch): Promise<void> {
+  const videoBytes = new Uint8Array(await readFile(videoPath));
+  const body = new FormData();
+  body.set("chat_id", String(chatId));
+  body.set("caption", caption);
+  body.set("supports_streaming", "true");
+  body.set("video", new Blob([videoBytes.buffer], { type: "video/mp4" }), "auto-body-reel.mp4");
+
+  let response: Response;
+  try {
+    response = await fetcher(TELEGRAM_API_URL + "/bot" + token + "/sendVideo", {
+      method: "POST", body, signal: AbortSignal.timeout(120_000),
+    });
+  } catch {
+    throw new Error("Telegram sendVideo request failed.");
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error("Telegram sendVideo returned an invalid response.");
+  }
+  const envelope = asRecord(payload);
+  if (!response.ok || envelope?.["ok"] !== true) throw new Error("Telegram sendVideo request was rejected.");
+}
+
 function formatTime(seconds: number): string {
   const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
   const wholeSeconds = Math.floor(safeSeconds);
@@ -328,6 +364,16 @@ export function formatVideoAnalysisMessages(
   return chunks;
 }
 
+
+function getProcessingFailureReply(error: unknown, stage: string): string {
+  if (error instanceof Error && error.message === TELEGRAM_FILE_TOO_LARGE_ERROR) return TELEGRAM_FILE_TOO_LARGE_REPLY;
+  if (error instanceof Error && error.message === TELEGRAM_REEL_TOO_LARGE_ERROR) return TELEGRAM_REEL_TOO_LARGE_REPLY;
+  if (error instanceof NoSuitableAutoReelSegmentsError) return "تحلیل انجام شد، اما بخش مناسب برای ساخت ریل خودکار پیدا نشد.";
+  if (stage === "render_reel") return "تحلیل کامل شد، اما تدوین ریل نهایی انجام نشد. گزارش تحلیل بالاتر است.";
+  if (stage === "send_reel") return "تحلیل و تدوین کامل شد، اما ارسال ویدئوی نهایی ناموفق بود.";
+  return "تحلیل ویدئو انجام نشد. لطفاً کمی بعد دوباره تلاش کنید.";
+}
+
 export async function processTelegramUpdate(
   update: TelegramUpdate,
   token: string,
@@ -349,7 +395,7 @@ export async function processTelegramUpdate(
   if (command === "/start" || command === "/help") {
     await sendMessage(
       chatId,
-      "برای دریافت تحلیل، یک ویدئوی تعمیر یا رنگ‌کاری بدنهٔ خودرو بفرستید. سقف دانلود تلگرام ۲۰ مگابایت است.",
+      "برای دریافت تحلیل و ریل خودکار، یک ویدئوی تعمیر یا رنگ‌کاری بدنهٔ خودرو بفرستید. سقف دانلود تلگرام ۲۰ مگابایت است.",
       token,
       fetcher,
     );
@@ -382,9 +428,15 @@ export async function processTelegramUpdate(
     return;
   }
 
-  await sendMessage(chatId, "ویدئو دریافت شد؛ در حال تحلیل آن هستم.", token, fetcher);
+  await sendMessage(
+    chatId,
+    "ویدئو دریافت شد؛ در حال تحلیل و آماده‌سازی ریل هستم.",
+    token,
+    fetcher,
+  );
 
   let videoPath: string | undefined;
+  let reelPath: string | undefined;
   let stage = "get_telegram_file";
   try {
     const file = await callTelegramApi<{ file_path?: unknown; file_size?: unknown }>(
@@ -413,18 +465,35 @@ export async function processTelegramUpdate(
     const uploadDirectory = options.uploadDirectory ?? getVideoUploadDirectory();
     stage = "store_video";
     await mkdir(uploadDirectory, { recursive: true });
-    videoPath = join(uploadDirectory, videoId);
-    await writeFile(videoPath, contents, { flag: "wx" });
+    const storedVideoPath = join(uploadDirectory, videoId);
+    videoPath = storedVideoPath;
+    await writeFile(storedVideoPath, contents, { flag: "wx" });
 
     stage = "analyze_video";
     const analyze =
       options.analyze ??
       ((id: string, path: string) => analyzeUploadedVideo(id, path));
-    const result = await analyze(videoId, videoPath);
+    const result = await analyze(videoId, storedVideoPath);
     stage = "send_analysis";
     for (const text of formatVideoAnalysisMessages(result)) {
       await sendMessage(chatId, text, token, fetcher);
     }
+
+    stage = "render_reel";
+    await sendMessage(chatId, "تحلیل کامل شد؛ در حال تدوین ریل نهایی هستم.", token, fetcher);
+    reelPath = join(uploadDirectory, videoId + "-reel.mp4");
+    const renderReel = options.renderReel ??
+      ((inputPath: string, outputPath: string, analysis: VideoAnalysisResult) =>
+        renderAutoBodyReel(inputPath, outputPath, analysis.segments, analysis.has_audio));
+    const plan = await renderReel(storedVideoPath, reelPath, result);
+    const reelStats = await stat(reelPath);
+    if (reelStats.size === 0) throw new Error("The edited reel is empty.");
+    if (reelStats.size > MAX_TELEGRAM_DOWNLOAD_BYTES) throw new Error(TELEGRAM_REEL_TOO_LARGE_ERROR);
+
+    stage = "send_reel";
+    const caption = "ریل نهایی آماده است؛ بخش‌ها: " + plan.clips.length +
+      " | مدت: " + formatTime(plan.durationSeconds);
+    await sendTelegramVideo(chatId, reelPath, caption, token, fetcher);
   } catch (error) {
     logTelegramProcessingError(
       update.updateId,
@@ -432,10 +501,7 @@ export async function processTelegramUpdate(
       error,
       "Telegram video processing failed",
     );
-    const failureReply =
-      error instanceof Error && error.message === TELEGRAM_FILE_TOO_LARGE_ERROR
-        ? TELEGRAM_FILE_TOO_LARGE_REPLY
-        : "تحلیل ویدئو انجام نشد. لطفاً کمی بعد دوباره تلاش کنید.";
+    const failureReply = getProcessingFailureReply(error, stage);
     try {
       await sendMessage(chatId, failureReply, token, fetcher);
     } catch (notificationError) {
@@ -447,6 +513,9 @@ export async function processTelegramUpdate(
       );
     }
   } finally {
+    if (reelPath) {
+      await unlink(reelPath).catch(() => undefined);
+    }
     if (videoPath) {
       await unlink(videoPath).catch(() => undefined);
     }
@@ -468,6 +537,7 @@ export function createTelegramWebhookHandler(
         fetcher: options.fetcher,
         uploadDirectory: options.uploadDirectory,
         analyze: options.analyze,
+        renderReel: options.renderReel,
       }));
 
   return (request: Request, response, _next): void => {

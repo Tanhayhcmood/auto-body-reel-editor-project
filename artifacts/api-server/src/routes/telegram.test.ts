@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -156,6 +156,7 @@ test("video updates download, analyze, reply, and remove the temporary upload", 
   t.after(async () => rm(uploadDirectory, { recursive: true, force: true }));
 
   const sentMessages: string[] = [];
+  const sentVideos: number[] = [];
   let analyzerCalled = false;
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -170,6 +171,15 @@ test("video updates download, analyze, reply, and remove the temporary upload", 
     }
     if (url.includes("/file/bottest-token/")) {
       return new Response(Uint8Array.from([0, 1, 2, 3]));
+    }
+    if (url.endsWith("/sendVideo")) {
+      assert.ok(init?.body instanceof FormData);
+      const video = init.body.get("video");
+      assert.ok(video instanceof Blob);
+      sentVideos.push(video.size);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 2 } }), {
+        headers: { "content-type": "application/json" },
+      });
     }
     if (url.endsWith("/sendMessage")) {
       const requestBody = JSON.parse(String(init?.body)) as { text: string };
@@ -196,11 +206,18 @@ test("video updates download, analyze, reply, and remove the temporary upload", 
       assert.ok(videoPath.startsWith(uploadDirectory));
       return analysisResult();
     },
+    renderReel: async (_inputPath, outputPath, result) => {
+      assert.ok(result.segments.length > 0);
+      await writeFile(outputPath, Buffer.from([1, 2, 3, 4]));
+      return { clips: [{ segment_id: "segment-1", start: 0, end: 12.5 }], durationSeconds: 12.5 };
+    },
   });
 
   assert.equal(analyzerCalled, true);
   assert.ok(sentMessages.some((message) => message.includes("در حال تحلیل")));
   assert.ok(sentMessages.some((message) => message.includes("تحلیل ویدئو کامل شد")));
+  assert.ok(sentMessages.some((message) => message.includes("در حال تدوین")));
+  assert.deepEqual(sentVideos, [4]);
   assert.deepEqual(await readdir(uploadDirectory), []);
 });
 
@@ -289,3 +306,28 @@ test("does not mislabel analysis failures as oversized videos", async (t) => {
   assert.doesNotMatch(sentMessages[1] ?? "", /ویدئوی کوتاه‌تری/);
   assert.deepEqual(await readdir(uploadDirectory), []);
 });
+
+test("keeps the completed analysis visible when reel rendering fails", async (t) => {
+  const uploadDirectory = await mkdtemp(join(tmpdir(), "telegram-reel-error-test-"));
+  t.after(async () => rm(uploadDirectory, { recursive: true, force: true }));
+  const sentMessages: string[] = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/getFile")) return new Response(JSON.stringify({ ok: true, result: { file_path: "videos/sample.mp4", file_size: 4 } }), { headers: { "content-type": "application/json" } });
+    if (url.includes("/file/bot")) return new Response(Uint8Array.from([0, 1, 2, 3]));
+    if (url.endsWith("/sendMessage")) {
+      const requestBody = JSON.parse(String(init?.body)) as { text: string };
+      sentMessages.push(requestBody.text);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { headers: { "content-type": "application/json" } });
+    }
+    return new Response("", { status: 404 });
+  };
+  await processTelegramUpdate({ updateId: 6, message: { chatId: 123, video: { fileId: "telegram-file-id", fileSize: 4 } } }, "test-token", {
+    fetcher, uploadDirectory, analyze: async () => analysisResult(),
+    renderReel: async () => { throw new Error("simulated FFmpeg failure"); },
+  });
+  assert.ok(sentMessages.some((message) => message.includes("تحلیل ویدئو کامل شد")));
+  assert.ok(sentMessages.some((message) => message.includes("تدوین ریل نهایی انجام نشد")));
+  assert.deepEqual(await readdir(uploadDirectory), []);
+});
+
