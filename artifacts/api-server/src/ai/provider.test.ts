@@ -59,3 +59,58 @@ test("rejects an unsupported provider instead of silently switching", () => {
     /Unsupported AI_PROVIDER/,
   );
 });
+
+test("retries temporary Gemini overloads and succeeds", async () => {
+  let requestCount = 0;
+  const retryDelays: number[] = [];
+  const provider = new GeminiProvider("gemini-3.8-flash", () => "test-key", {
+    fetcher: async () => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return new Response(
+          JSON.stringify({ error: { message: "Temporary model overload." } }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: "recovered" }] } }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+    sleep: async (milliseconds) => {
+      retryDelays.push(milliseconds);
+    },
+  });
+
+  assert.equal(await provider.generateText("test prompt"), "recovered");
+  assert.equal(requestCount, 2);
+  assert.deepEqual(retryDelays, [1_000]);
+});
+
+test("stops after three attempts when Gemini remains unavailable", async () => {
+  let requestCount = 0;
+  const retryDelays: number[] = [];
+  const provider = new GeminiProvider("gemini-3.8-flash", () => "test-key", {
+    fetcher: async () => {
+      requestCount += 1;
+      return new Response(
+        JSON.stringify({ error: { message: "Still overloaded." } }),
+        { status: 503, headers: { "content-type": "application/json" } },
+      );
+    },
+    sleep: async (milliseconds) => {
+      retryDelays.push(milliseconds);
+    },
+  });
+
+  await assert.rejects(
+    provider.generateText("test prompt"),
+    (error: unknown) =>
+      error instanceof GeminiAPIError &&
+      error.message === "Gemini API request failed with status 503." &&
+      error.upstreamMessage === "Still overloaded.",
+  );
+  assert.equal(requestCount, 3);
+  assert.deepEqual(retryDelays, [1_000, 2_000]);
+});
+

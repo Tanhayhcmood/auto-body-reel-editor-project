@@ -1,5 +1,9 @@
 const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
+const MAX_GEMINI_REQUEST_ATTEMPTS = 3;
+const INITIAL_GEMINI_RETRY_DELAY_MS = 1_000;
+const MAX_GEMINI_RETRY_DELAY_MS = 5_000;
+const RETRYABLE_GEMINI_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 const MAX_INLINE_IMAGE_BYTES = 14 * 1024 * 1024;
 const MAX_MULTIMODAL_IMAGES = 48;
 
@@ -17,6 +21,11 @@ export interface GeminiImageInput {
   label: string;
   mimeType: "image/jpeg";
   data: Uint8Array;
+}
+
+export interface GeminiProviderOptions {
+  fetcher?: typeof fetch;
+  sleep?: (milliseconds: number) => Promise<void>;
 }
 
 export class GeminiAPIError extends Error {
@@ -68,6 +77,32 @@ async function readGeminiErrorMessage(
   }
 }
 
+function getGeminiRetryDelayMs(
+  attempt: number,
+  retryAfterHeader: string | null = null,
+): number {
+  const retryAfter = retryAfterHeader?.trim();
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(MAX_GEMINI_RETRY_DELAY_MS, seconds * 1_000);
+    }
+
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) {
+      return Math.min(
+        MAX_GEMINI_RETRY_DELAY_MS,
+        Math.max(0, retryAt - Date.now()),
+      );
+    }
+  }
+
+  return Math.min(
+    MAX_GEMINI_RETRY_DELAY_MS,
+    INITIAL_GEMINI_RETRY_DELAY_MS * 2 ** (attempt - 1),
+  );
+}
+
 export class GeminiProvider implements AIProvider {
   readonly name = "gemini";
 
@@ -75,6 +110,7 @@ export class GeminiProvider implements AIProvider {
     readonly model: string,
     private readonly getApiKey: () => string | undefined = () =>
       process.env["GEMINI_API_KEY"],
+    private readonly options: GeminiProviderOptions = {},
   ) {}
 
   async generateText(prompt: string): Promise<string> {
@@ -117,6 +153,17 @@ export class GeminiProvider implements AIProvider {
     });
   }
 
+  private waitForRetry(
+    attempt: number,
+    retryAfterHeader: string | null = null,
+  ): Promise<void> {
+    const milliseconds = getGeminiRetryDelayMs(attempt, retryAfterHeader);
+    if (this.options.sleep) {
+      return this.options.sleep(milliseconds);
+    }
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+
   private async request(
     parts: Array<Record<string, unknown>>,
     generationConfig?: Record<string, unknown>,
@@ -133,29 +180,49 @@ export class GeminiProvider implements AIProvider {
       body["generationConfig"] = generationConfig;
     }
 
-    let response: Response;
-    try {
-      response = await fetch(
-        `${GEMINI_API_BASE_URL}/${encodeURIComponent(this.model)}:generateContent`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-goog-api-key": apiKey,
-          },
-          body: JSON.stringify(body),
-        },
-      );
-    } catch {
-      throw new GeminiAPIError("Gemini API could not be reached.");
+    let response: Response | undefined;
+    const requestUrl =
+      `${GEMINI_API_BASE_URL}/${encodeURIComponent(this.model)}:generateContent`;
+    const requestOptions: RequestInit = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify(body),
+    };
+
+    for (let attempt = 1; attempt <= MAX_GEMINI_REQUEST_ATTEMPTS; attempt += 1) {
+      try {
+        response = await (this.options.fetcher ?? fetch)(requestUrl, requestOptions);
+      } catch {
+        if (attempt === MAX_GEMINI_REQUEST_ATTEMPTS) {
+          throw new GeminiAPIError("Gemini API could not be reached.");
+        }
+        await this.waitForRetry(attempt);
+        continue;
+      }
+
+      if (response.ok) {
+        break;
+      }
+
+      const upstreamMessage = await readGeminiErrorMessage(response);
+      if (
+        attempt === MAX_GEMINI_REQUEST_ATTEMPTS ||
+        !RETRYABLE_GEMINI_STATUS_CODES.has(response.status)
+      ) {
+        throw new GeminiAPIError(
+          `Gemini API request failed with status ${response.status}.`,
+          upstreamMessage,
+        );
+      }
+
+      await this.waitForRetry(attempt, response.headers.get("retry-after"));
     }
 
-    if (!response.ok) {
-      const upstreamMessage = await readGeminiErrorMessage(response);
-      throw new GeminiAPIError(
-        `Gemini API request failed with status ${response.status}.`,
-        upstreamMessage,
-      );
+    if (!response || !response.ok) {
+      throw new GeminiAPIError("Gemini API did not return a successful response.");
     }
 
     let result: GeminiGenerateContentResponse;
