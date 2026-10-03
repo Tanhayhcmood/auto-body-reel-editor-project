@@ -8,7 +8,7 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/ai/provider.test.ts src/videos/*.test.ts"
+    "test": "tsx --test src/ai/provider.test.ts src/middlewares/api-key-auth.test.ts src/videos/*.test.ts"
   },
   "dependencies": {
     "@workspace/api-zod": "workspace:*",
