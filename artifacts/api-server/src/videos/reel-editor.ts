@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { rm, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { createAIProvider, type AIProvider } from "../ai/provider";
+import { logger } from "../lib/logger";
 import type { SegmentAnalysis } from "./analysis-schema";
 import {
   transcribeVideoAudio,
@@ -32,6 +33,8 @@ export interface AutoReelRenderResult extends AutoReelPlan {
   instagramCaption: string;
   coverPath: string;
   transcriptSegmentCount: number;
+  storyboardFallback?: boolean;
+  transcriptionFailed?: boolean;
 }
 
 export interface AutoReelRenderOptions {
@@ -329,15 +332,24 @@ export async function renderAutoBodyReel(
   const audioPath = outputPath + ".audio.mp3";
   const coverPath = outputPath.replace(/\.mp4$/i, "-cover.jpg");
   let transcript: TranscriptSegment[] = [];
+  let transcriptionFailed = false;
 
   try {
     if (hasAudio) {
-      transcript = await (options.transcribeAudio ?? transcribeVideoAudio)(
-        inputPath,
-        audioPath,
-        segments.reduce((max, segment) => Math.max(max, segment.end), 0),
-        provider,
-      );
+      try {
+        transcript = await (options.transcribeAudio ?? transcribeVideoAudio)(
+          inputPath,
+          audioPath,
+          segments.reduce((max, segment) => Math.max(max, segment.end), 0),
+          provider,
+        );
+      } catch (error) {
+        transcriptionFailed = true;
+        logger.warn(
+          { errorName: error instanceof Error ? error.name : "UnknownError" },
+          "Audio transcription unavailable; continuing without subtitles.",
+        );
+      }
     }
     await writeFile(
       subtitlesPath,
@@ -385,6 +397,8 @@ export async function renderAutoBodyReel(
       instagramCaption: editorial.instagramCaption,
       coverPath,
       transcriptSegmentCount: transcript.length,
+      storyboardFallback: editorial.usedFallback ?? false,
+      transcriptionFailed,
     };
   } finally {
     await Promise.all([

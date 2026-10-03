@@ -132,6 +132,61 @@ test("renders the AI storyboard, subtitle track, and cover through the FFmpeg pi
   assert.ok(!(await readdir(directory)).some((entry) => entry.endsWith(".ass") || entry.endsWith(".audio.mp3")));
 });
 
+test("still renders and preserves source audio when optional transcription fails", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "reel-transcription-fallback-test-"));
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+  const outputPath = join(directory, "reel.mp4");
+  const seenArgs: string[][] = [];
+  let renderedAss = "";
+  const editorial: ReelStoryboard = {
+    hook: "شروع ترمیم",
+    cta: "برای مشاوره پیام بده",
+    instagramCaption: "مراحل ترمیم بدنه",
+    clips: [{ segment_id: "segment-001", start: 0, end: 4 }],
+    overlays: [],
+    durationSeconds: 4,
+  };
+
+  const result = await renderAutoBodyReel(
+    "source.mp4",
+    outputPath,
+    [segment()],
+    true,
+    {
+      provider: {
+        name: "gemini",
+        model: "test-model",
+        generateText: async () => "",
+        generateMultimodal: async () => "",
+      },
+      createStoryboard: async () => editorial,
+      transcribeAudio: async () => {
+        throw new Error("Temporary Gemini outage.");
+      },
+      runFfmpeg: async (args) => {
+        seenArgs.push(args);
+        if (seenArgs.length === 1) {
+          const filterIndex = args.indexOf("-filter_complex");
+          const filterGraph = args[filterIndex + 1] ?? "";
+          const subtitlesPath = filterGraph.match(/subtitles=filename='([^']+)'/)?.[1];
+          assert.ok(subtitlesPath);
+          renderedAss = await readFile(subtitlesPath, "utf8");
+        }
+        const destination = args[args.length - 1];
+        assert.ok(destination);
+        await writeFile(destination, Buffer.from("rendered"));
+      },
+    },
+  );
+
+  assert.equal(result.transcriptionFailed, true);
+  assert.equal(result.transcriptSegmentCount, 0);
+  assert.equal(seenArgs.length, 2);
+  assert.match(seenArgs[0]?.join(" ") ?? "", /-map \[aout\]/);
+  assert.match(renderedAss, /Dialogue: 2,/);
+  assert.doesNotMatch(renderedAss, /Dialogue: 3,/);
+});
+
 test("FFmpeg creates a portrait H.264 reel and a readable cover frame", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "reel-ffmpeg-integration-"));
   t.after(async () => rm(directory, { recursive: true, force: true }));

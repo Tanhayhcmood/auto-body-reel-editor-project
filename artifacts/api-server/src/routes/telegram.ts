@@ -547,6 +547,8 @@ export async function processTelegramUpdate(
         clipCount: plan.clips.length,
         durationSeconds: plan.durationSeconds,
         transcriptSegmentCount: plan.transcriptSegmentCount,
+        storyboardFallback: plan.storyboardFallback ?? false,
+        transcriptionFailed: plan.transcriptionFailed ?? false,
         reelBytes: reelStats.size,
       },
       "Instagram-ready reel rendered",
@@ -566,7 +568,13 @@ export async function processTelegramUpdate(
       fetcher,
     );
     const caption = "ریل نهایی آماده است؛ بخش‌ها: " + plan.clips.length +
-      " | مدت: " + formatTime(plan.durationSeconds) + "\n" + truncate(plan.cta, 100);
+      " | مدت: " + formatTime(plan.durationSeconds) + "\n" + truncate(plan.cta, 100) +
+      (plan.storyboardFallback
+        ? "\nطرح تدوین پشتیبان به‌علت اختلال موقت هوش مصنوعی استفاده شد."
+        : "") +
+      (plan.transcriptionFailed
+        ? "\nصدای اصلی حفظ شده؛ زیرنویس گفتار آماده نشد."
+        : "");
     await sendTelegramVideo(chatId, reelPath, caption, token, fetcher);
   } catch (error) {
     logTelegramProcessingError(

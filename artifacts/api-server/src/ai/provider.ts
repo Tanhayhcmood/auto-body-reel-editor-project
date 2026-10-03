@@ -42,12 +42,17 @@ export interface GeminiProviderOptions {
 }
 
 export class GeminiAPIError extends Error {
+  readonly retryable: boolean;
+
   constructor(
     message: string,
     readonly upstreamMessage?: string,
+    readonly statusCode?: number,
+    retryable = statusCode !== undefined && RETRYABLE_GEMINI_STATUS_CODES.has(statusCode),
   ) {
     super(message);
     this.name = "GeminiAPIError";
+    this.retryable = retryable;
   }
 }
 
@@ -210,7 +215,12 @@ export class GeminiProvider implements AIProvider {
         response = await (this.options.fetcher ?? fetch)(requestUrl, requestOptions);
       } catch {
         if (attempt === MAX_GEMINI_REQUEST_ATTEMPTS) {
-          throw new GeminiAPIError("Gemini API could not be reached.");
+          throw new GeminiAPIError(
+            "Gemini API could not be reached.",
+            undefined,
+            undefined,
+            true,
+          );
         }
         await this.waitForRetry(attempt);
         continue;
@@ -228,6 +238,7 @@ export class GeminiProvider implements AIProvider {
         throw new GeminiAPIError(
           `Gemini API request failed with status ${response.status}.`,
           upstreamMessage,
+          response.status,
         );
       }
 

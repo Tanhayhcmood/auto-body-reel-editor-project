@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AIProvider } from "../ai/provider";
+import { GeminiAPIError, type AIProvider } from "../ai/provider";
 import type { SegmentAnalysis } from "./analysis-schema";
 import type { ReelClip } from "./reel-editor";
 
@@ -40,6 +40,7 @@ export interface ReelStoryboard {
   clips: ReelClip[];
   overlays: Array<{ segment_id: string; text: string }>;
   durationSeconds: number;
+  usedFallback?: boolean;
 }
 
 export class InvalidReelStoryboardError extends Error {
@@ -113,6 +114,71 @@ export function validateReelStoryboard(
   };
 }
 
+function createFallbackStoryboard(
+  segments: SegmentAnalysis[],
+  maxDurationSeconds: number,
+): ReelStoryboard | undefined {
+  if (!Number.isFinite(maxDurationSeconds) || maxDurationSeconds < 1) {
+    return undefined;
+  }
+
+  const excludedLabels = new Set(["blurry", "repetitive", "uninteresting"]);
+  const candidates = segments
+    .filter(
+      (segment) =>
+        Number.isFinite(segment.start) &&
+        Number.isFinite(segment.end) &&
+        segment.start >= 0 &&
+        segment.end - segment.start >= 1 &&
+        segment.repair_relevance >= 0.35 &&
+        segment.quality_score >= 0.25 &&
+        !segment.labels.some((label) => excludedLabels.has(label)),
+    )
+    .map((segment) => ({
+      segment,
+      score:
+        segment.repair_relevance * 0.55 +
+        segment.quality_score * 0.2 +
+        segment.interest_score * 0.15 +
+        segment.transformation_value * 0.1,
+    }))
+    .sort(
+      (left, right) =>
+        right.score - left.score || left.segment.start - right.segment.start,
+    );
+
+  const clips: ReelClip[] = [];
+  let remainingSeconds = maxDurationSeconds;
+  for (const { segment } of candidates) {
+    if (clips.length >= 12 || remainingSeconds < 1) break;
+    const duration = Math.min(segment.end - segment.start, remainingSeconds);
+    if (duration < 1) continue;
+    clips.push({
+      segment_id: segment.segment_id,
+      start: segment.start,
+      end: Number((segment.start + duration).toFixed(4)),
+    });
+    remainingSeconds -= duration;
+  }
+
+  if (clips.length === 0) return undefined;
+  clips.sort((left, right) => left.start - right.start);
+
+  return {
+    hook: "نگاهی به مراحل ترمیم بدنه",
+    cta: "برای مشاورهٔ ترمیم پیام بده",
+    instagramCaption:
+      "مراحل قابل‌مشاهدهٔ ترمیم بدنهٔ خودرو؛ برای ارزیابی دقیق، خودرو باید حضوری بررسی شود.\n" +
+      "#صافکاری #تعمیر_بدنه #خودرو",
+    clips,
+    overlays: [],
+    durationSeconds: Number(
+      clips.reduce((sum, clip) => sum + clip.end - clip.start, 0).toFixed(3),
+    ),
+    usedFallback: true,
+  };
+}
+
 export async function createReelStoryboard(
   segments: SegmentAnalysis[],
   provider: AIProvider,
@@ -163,6 +229,14 @@ export async function createReelStoryboard(
     ),
   ].join("\n\n");
 
-  const response = await provider.generateText(prompt);
-  return validateReelStoryboard(response, segments, maxDurationSeconds);
+  try {
+    const response = await provider.generateText(prompt);
+    return validateReelStoryboard(response, segments, maxDurationSeconds);
+  } catch (error) {
+    if (error instanceof GeminiAPIError && error.retryable) {
+      const fallback = createFallbackStoryboard(segments, maxDurationSeconds);
+      if (fallback) return fallback;
+    }
+    throw error;
+  }
 }

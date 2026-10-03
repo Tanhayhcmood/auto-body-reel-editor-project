@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { GeminiAPIError } from "../ai/provider";
 import {
   createReelStoryboard,
   InvalidReelStoryboardError,
@@ -86,4 +87,34 @@ test("asks the configured AI provider for a storyboard and validates its respons
   assert.equal(plan.clips.length, 2);
   assert.match(prompt, /Persian/);
   assert.match(prompt, /source segments/);
+});
+
+test("builds a truthful local fallback storyboard after a temporary Gemini outage", async () => {
+  const provider = {
+    name: "gemini",
+    model: "test-model",
+    generateText: async () => {
+      throw new GeminiAPIError(
+        "Gemini API request failed with status 503.",
+        "Temporary model overload.",
+        503,
+      );
+    },
+    generateMultimodal: async () => "",
+  };
+
+  const plan = await createReelStoryboard(
+    [
+      segment("opening", 0, 5),
+      segment("finish", 10, 18),
+      { ...segment("noise", 20, 26), labels: ["uninteresting"] },
+    ],
+    provider,
+  );
+
+  assert.equal(plan.usedFallback, true);
+  assert.deepEqual(plan.clips.map((clip) => clip.segment_id), ["opening", "finish"]);
+  assert.equal(plan.durationSeconds, 13);
+  assert.deepEqual(plan.overlays, []);
+  assert.match(plan.instagramCaption, /حضوری بررسی شود/);
 });
