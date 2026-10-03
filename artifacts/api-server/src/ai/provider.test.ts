@@ -18,6 +18,38 @@ test("defaults to the current stable Gemini Flash model", () => {
   assert.equal(provider.model, "gemini-3.8-flash");
 });
 
+test("sends compressed audio to Gemini as an inline audio part", async () => {
+  let requestBody: Record<string, unknown> | undefined;
+  const provider = new GeminiProvider("gemini-3.8-flash", () => "test-key", {
+    fetcher: async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"segments":[]}' }] } }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+
+  const result = await provider.generateMultimodal("Transcribe this audio.", [
+    {
+      label: "Source audio",
+      mimeType: "audio/mp3",
+      data: Uint8Array.from([1, 2, 3]),
+    },
+  ]);
+
+  assert.equal(result, '{"segments":[]}');
+  const contents = requestBody?.["contents"] as Array<{
+    parts: Array<Record<string, unknown>>;
+  }>;
+  const audioPart = contents[0]?.parts[2]?.["inline_data"] as {
+    mime_type: string;
+    data: string;
+  };
+  assert.equal(audioPart.mime_type, "audio/mp3");
+  assert.equal(audioPart.data, "AQID");
+});
+
 test("keeps a sanitized upstream reason for Gemini API failures", async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = "";

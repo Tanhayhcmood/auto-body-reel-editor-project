@@ -11,7 +11,7 @@ import { getVideoUploadDirectory } from "../videos/storage";
 import {
   NoSuitableAutoReelSegmentsError,
   renderAutoBodyReel,
-  type AutoReelPlan,
+  type AutoReelRenderResult,
 } from "../videos/reel-editor";
 
 const TELEGRAM_API_URL = "https://api.telegram.org";
@@ -55,7 +55,11 @@ export interface TelegramProcessingOptions {
   fetcher?: typeof fetch;
   uploadDirectory?: string;
   analyze?: VideoAnalyzer;
-  renderReel?: (inputPath: string, outputPath: string, result: VideoAnalysisResult) => Promise<AutoReelPlan>;
+  renderReel?: (
+    inputPath: string,
+    outputPath: string,
+    result: VideoAnalysisResult,
+  ) => Promise<AutoReelRenderResult>;
 }
 
 export interface TelegramWebhookOptions extends TelegramProcessingOptions {
@@ -317,6 +321,45 @@ async function sendTelegramVideo(chatId: number, videoPath: string, caption: str
   if (!response.ok || envelope?.["ok"] !== true) throw new Error("Telegram sendVideo request was rejected.");
 }
 
+async function sendTelegramPhoto(
+  chatId: number,
+  photoPath: string,
+  caption: string,
+  token: string,
+  fetcher: typeof fetch,
+): Promise<void> {
+  const photoBytes = new Uint8Array(await readFile(photoPath));
+  const body = new FormData();
+  body.set("chat_id", String(chatId));
+  body.set("caption", caption);
+  body.set(
+    "photo",
+    new Blob([photoBytes.buffer], { type: "image/jpeg" }),
+    "instagram-reel-cover.jpg",
+  );
+
+  let response: Response;
+  try {
+    response = await fetcher(TELEGRAM_API_URL + "/bot" + token + "/sendPhoto", {
+      method: "POST",
+      body,
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch {
+    throw new Error("Telegram sendPhoto request failed.");
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error("Telegram sendPhoto returned an invalid response.");
+  }
+  const envelope = asRecord(payload);
+  if (!response.ok || envelope?.["ok"] !== true) {
+    throw new Error("Telegram sendPhoto request was rejected.");
+  }
+}
+
 function formatTime(seconds: number): string {
   const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
   const wholeSeconds = Math.floor(safeSeconds);
@@ -395,7 +438,7 @@ export async function processTelegramUpdate(
   if (command === "/start" || command === "/help") {
     await sendMessage(
       chatId,
-      "برای دریافت تحلیل و ریل خودکار، یک ویدئوی تعمیر یا رنگ‌کاری بدنهٔ خودرو بفرستید. سقف دانلود تلگرام ۲۰ مگابایت است.",
+      "برای تحلیل و ساخت ریل عمودی ۹:۱۶ از تعمیر یا رنگ‌کاری بدنهٔ خودرو، ویدئو را بفرستید. ریل همراه زیرنویس فارسی، کاور و کپشن پیشنهادی آماده می‌شود. سقف دانلود تلگرام ۲۰ مگابایت است.",
       token,
       fetcher,
     );
@@ -437,6 +480,7 @@ export async function processTelegramUpdate(
 
   let videoPath: string | undefined;
   let reelPath: string | undefined;
+  let coverPath: string | undefined;
   let stage = "get_telegram_file";
   try {
     const file = await callTelegramApi<{ file_path?: unknown; file_size?: unknown }>(
@@ -482,17 +526,47 @@ export async function processTelegramUpdate(
     stage = "render_reel";
     await sendMessage(chatId, "تحلیل کامل شد؛ در حال تدوین ریل نهایی هستم.", token, fetcher);
     reelPath = join(uploadDirectory, videoId + "-reel.mp4");
+    coverPath = reelPath.replace(/\.mp4$/i, "-cover.jpg");
     const renderReel = options.renderReel ??
       ((inputPath: string, outputPath: string, analysis: VideoAnalysisResult) =>
         renderAutoBodyReel(inputPath, outputPath, analysis.segments, analysis.has_audio));
     const plan = await renderReel(storedVideoPath, reelPath, result);
+    coverPath = plan.coverPath;
     const reelStats = await stat(reelPath);
     if (reelStats.size === 0) throw new Error("The edited reel is empty.");
     if (reelStats.size > MAX_TELEGRAM_DOWNLOAD_BYTES) throw new Error(TELEGRAM_REEL_TOO_LARGE_ERROR);
+    const coverStats = await stat(coverPath);
+    if (coverStats.size === 0 || coverStats.size > 10_000_000) {
+      throw new Error("The edited Reel cover exceeds Telegram's photo upload limit.");
+    }
 
     stage = "send_reel";
+    logger.info(
+      {
+        updateId: update.updateId,
+        clipCount: plan.clips.length,
+        durationSeconds: plan.durationSeconds,
+        transcriptSegmentCount: plan.transcriptSegmentCount,
+        reelBytes: reelStats.size,
+      },
+      "Instagram-ready reel rendered",
+    );
+    await sendTelegramPhoto(
+      chatId,
+      coverPath,
+      "کاور پیشنهادی ریل: " + truncate(plan.hook, 100),
+      token,
+      fetcher,
+    );
+    await sendMessage(
+      chatId,
+      "متن پیشنهادی برای کپشن اینستاگرام:\n\n" +
+        truncate(plan.instagramCaption, MAX_TELEGRAM_MESSAGE_LENGTH - 50),
+      token,
+      fetcher,
+    );
     const caption = "ریل نهایی آماده است؛ بخش‌ها: " + plan.clips.length +
-      " | مدت: " + formatTime(plan.durationSeconds);
+      " | مدت: " + formatTime(plan.durationSeconds) + "\n" + truncate(plan.cta, 100);
     await sendTelegramVideo(chatId, reelPath, caption, token, fetcher);
   } catch (error) {
     logTelegramProcessingError(
@@ -515,6 +589,9 @@ export async function processTelegramUpdate(
   } finally {
     if (reelPath) {
       await unlink(reelPath).catch(() => undefined);
+    }
+    if (coverPath) {
+      await unlink(coverPath).catch(() => undefined);
     }
     if (videoPath) {
       await unlink(videoPath).catch(() => undefined);

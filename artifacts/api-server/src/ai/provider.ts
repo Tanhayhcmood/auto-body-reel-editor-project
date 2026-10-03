@@ -4,8 +4,8 @@ const MAX_GEMINI_REQUEST_ATTEMPTS = 3;
 const INITIAL_GEMINI_RETRY_DELAY_MS = 1_000;
 const MAX_GEMINI_RETRY_DELAY_MS = 5_000;
 const RETRYABLE_GEMINI_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
-const MAX_INLINE_IMAGE_BYTES = 14 * 1024 * 1024;
-const MAX_MULTIMODAL_IMAGES = 48;
+const MAX_INLINE_MEDIA_BYTES = 14 * 1024 * 1024;
+const MAX_MULTIMODAL_INPUTS = 48;
 
 export interface AIProvider {
   readonly name: string;
@@ -13,15 +13,28 @@ export interface AIProvider {
   generateText(prompt: string): Promise<string>;
   generateMultimodal(
     prompt: string,
-    images: GeminiImageInput[],
+    inputs: GeminiMultimodalInput[],
   ): Promise<string>;
 }
 
-export interface GeminiImageInput {
+interface GeminiMediaInput {
   label: string;
+  data: Uint8Array;
+}
+
+export interface GeminiImageInput {
+  label: GeminiMediaInput["label"];
   mimeType: "image/jpeg";
   data: Uint8Array;
 }
+
+export interface GeminiAudioInput {
+  label: GeminiMediaInput["label"];
+  mimeType: "audio/mp3";
+  data: Uint8Array;
+}
+
+export type GeminiMultimodalInput = GeminiImageInput | GeminiAudioInput;
 
 export interface GeminiProviderOptions {
   fetcher?: typeof fetch;
@@ -119,29 +132,29 @@ export class GeminiProvider implements AIProvider {
 
   async generateMultimodal(
     prompt: string,
-    images: GeminiImageInput[],
+    inputs: GeminiMultimodalInput[],
   ): Promise<string> {
-    if (images.length === 0 || images.length > MAX_MULTIMODAL_IMAGES) {
+    if (inputs.length === 0 || inputs.length > MAX_MULTIMODAL_INPUTS) {
       throw new Error(
-        `Gemini Vision requires between 1 and ${MAX_MULTIMODAL_IMAGES} images per request.`,
+        `Gemini requires between 1 and ${MAX_MULTIMODAL_INPUTS} media inputs per request.`,
       );
     }
 
-    const totalImageBytes = images.reduce(
-      (total, image) => total + image.data.byteLength,
+    const totalMediaBytes = inputs.reduce(
+      (total, input) => total + input.data.byteLength,
       0,
     );
-    if (totalImageBytes > MAX_INLINE_IMAGE_BYTES) {
-      throw new Error("Gemini Vision image payload exceeds the safe request limit.");
+    if (totalMediaBytes > MAX_INLINE_MEDIA_BYTES) {
+      throw new Error("Gemini multimodal payload exceeds the safe request limit.");
     }
 
     const parts: Array<Record<string, unknown>> = [{ text: prompt }];
-    for (const image of images) {
-      parts.push({ text: image.label });
+    for (const input of inputs) {
+      parts.push({ text: input.label });
       parts.push({
         inline_data: {
-          mime_type: image.mimeType,
-          data: Buffer.from(image.data).toString("base64"),
+          mime_type: input.mimeType,
+          data: Buffer.from(input.data).toString("base64"),
         },
       });
     }

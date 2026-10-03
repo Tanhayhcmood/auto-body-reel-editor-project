@@ -23,6 +23,7 @@ Evidence rules:
 - Frames are sparse samples, not the full video. Do not claim an action occurred between frames unless the visible sequence supports that claim.
 - If the supplied frames do not establish what is happening, state that it is unclear from the provided frames, keep visual_events empty where appropriate, and do not assign unsupported labels.
 - Treat each segment independently. Use the frame labels and timestamps to preserve chronological order within a segment.
+- Write summary and visual_events in concise, natural Persian. Keep labels and JSON keys exactly as specified.
 
 For each input segment return one object with exactly these fields: segment_id, start, end, summary, visual_events, labels, quality_score, interest_score, repair_relevance, transformation_value.
 Use the exact segment_id, start, and end supplied. summary must be a concise factual observation. visual_events must be a list of short, visible events in chronological order. labels may only contain: damaged_area, before_repair, repair_process, tools_action, close_up_detail, satisfying_moment, final_result, vehicle_reveal, painting, sanding, polishing, dent_repair, uninteresting, repetitive, blurry.

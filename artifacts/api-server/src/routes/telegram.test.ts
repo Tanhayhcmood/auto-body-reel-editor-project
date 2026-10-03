@@ -157,6 +157,7 @@ test("video updates download, analyze, reply, and remove the temporary upload", 
 
   const sentMessages: string[] = [];
   const sentVideos: number[] = [];
+  const sentPhotos: number[] = [];
   let analyzerCalled = false;
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -171,6 +172,15 @@ test("video updates download, analyze, reply, and remove the temporary upload", 
     }
     if (url.includes("/file/bottest-token/")) {
       return new Response(Uint8Array.from([0, 1, 2, 3]));
+    }
+    if (url.endsWith("/sendPhoto")) {
+      assert.ok(init?.body instanceof FormData);
+      const photo = init.body.get("photo");
+      assert.ok(photo instanceof Blob);
+      sentPhotos.push(photo.size);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 3 } }), {
+        headers: { "content-type": "application/json" },
+      });
     }
     if (url.endsWith("/sendVideo")) {
       assert.ok(init?.body instanceof FormData);
@@ -209,7 +219,17 @@ test("video updates download, analyze, reply, and remove the temporary upload", 
     renderReel: async (_inputPath, outputPath, result) => {
       assert.ok(result.segments.length > 0);
       await writeFile(outputPath, Buffer.from([1, 2, 3, 4]));
-      return { clips: [{ segment_id: "segment-1", start: 0, end: 12.5 }], durationSeconds: 12.5 };
+      const coverPath = outputPath.replace(/\.mp4$/i, "-cover.jpg");
+      await writeFile(coverPath, Buffer.from([5, 6, 7]));
+      return {
+        clips: [{ segment_id: "segment-1", start: 0, end: 12.5 }],
+        durationSeconds: 12.5,
+        hook: "ترمیم بدنه",
+        cta: "نتیجه را ببینید",
+        instagramCaption: "ترمیم مرحله‌به‌مرحله #بدنه",
+        coverPath,
+        transcriptSegmentCount: 1,
+      };
     },
   });
 
@@ -217,6 +237,8 @@ test("video updates download, analyze, reply, and remove the temporary upload", 
   assert.ok(sentMessages.some((message) => message.includes("در حال تحلیل")));
   assert.ok(sentMessages.some((message) => message.includes("تحلیل ویدئو کامل شد")));
   assert.ok(sentMessages.some((message) => message.includes("در حال تدوین")));
+  assert.ok(sentMessages.some((message) => message.includes("کپشن اینستاگرام")));
+  assert.deepEqual(sentPhotos, [3]);
   assert.deepEqual(sentVideos, [4]);
   assert.deepEqual(await readdir(uploadDirectory), []);
 });
