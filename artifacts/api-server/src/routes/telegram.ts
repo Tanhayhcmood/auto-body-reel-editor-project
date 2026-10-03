@@ -143,19 +143,33 @@ function secretsMatch(expected: string, provided: string | undefined): boolean {
   );
 }
 
-function safeErrorDetails(error: unknown): {
-  errorName: string;
-  errorMessage: string;
-} {
-  const errorName =
-    error instanceof Error && error.name ? error.name : "UnknownError";
-  const rawMessage = error instanceof Error ? error.message : String(error);
-  const errorMessage = rawMessage
+function redactLogText(message: string): string {
+  return message
     .replace(/\b\d{6,}:[A-Za-z0-9_-]{20,}\b/g, "[REDACTED_TELEGRAM_TOKEN]")
     .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "[REDACTED_API_KEY]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
     .slice(0, 300);
-  return { errorName: errorName.slice(0, 80), errorMessage };
+}
+
+function safeErrorDetails(error: unknown): {
+  errorName: string;
+  errorMessage: string;
+  upstreamMessage?: string;
+} {
+  const errorName =
+    error instanceof Error && error.name ? error.name : "UnknownError";
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const upstreamMessage =
+    error instanceof Error &&
+    "upstreamMessage" in error &&
+    typeof error.upstreamMessage === "string"
+      ? redactLogText(error.upstreamMessage)
+      : undefined;
+  return {
+    errorName: errorName.slice(0, 80),
+    errorMessage: redactLogText(rawMessage),
+    ...(upstreamMessage ? { upstreamMessage } : {}),
+  };
 }
 
 function logTelegramProcessingError(

@@ -1,5 +1,5 @@
 const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
 const MAX_INLINE_IMAGE_BYTES = 14 * 1024 * 1024;
 const MAX_MULTIMODAL_IMAGES = 48;
 
@@ -20,7 +20,10 @@ export interface GeminiImageInput {
 }
 
 export class GeminiAPIError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly upstreamMessage?: string,
+  ) {
     super(message);
     this.name = "GeminiAPIError";
   }
@@ -34,6 +37,35 @@ interface GeminiGenerateContentResponse {
       parts?: Array<{ text?: string }>;
     };
   }>;
+}
+
+interface GeminiErrorResponse {
+  error?: {
+    message?: unknown;
+  };
+}
+
+function sanitizeGeminiErrorMessage(message: string): string {
+  return message
+    .replace(/\b\d{6,}:[A-Za-z0-9_-]{20,}\b/g, "[REDACTED_TELEGRAM_TOKEN]")
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "[REDACTED_API_KEY]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 300);
+}
+
+async function readGeminiErrorMessage(
+  response: Response,
+): Promise<string | undefined> {
+  try {
+    const payload = (await response.json()) as GeminiErrorResponse;
+    return typeof payload.error?.message === "string"
+      ? sanitizeGeminiErrorMessage(payload.error.message)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export class GeminiProvider implements AIProvider {
@@ -119,8 +151,10 @@ export class GeminiProvider implements AIProvider {
     }
 
     if (!response.ok) {
+      const upstreamMessage = await readGeminiErrorMessage(response);
       throw new GeminiAPIError(
         `Gemini API request failed with status ${response.status}.`,
+        upstreamMessage,
       );
     }
 
